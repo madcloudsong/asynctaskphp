@@ -69,7 +69,7 @@ class Promise implements IDeferred, IPromise
 			while (count($this->callbacks) > 0)
 			{
 				$callback = array_shift($this->callbacks);
-				$callback($this->rejectedException, $this->resolvedValue);
+				$callback($this->resolvedValue, $this->rejectedException);
 			}
 		}
 	}
@@ -125,16 +125,21 @@ class Event
 	}
 	
 	// EV_TIMEOUT, EV_SIGNAL, EV_READ, EV_WRITE and EV_PERSIST.
-	public function set($fd, $events, $callback, $arg)
+	public function set($fd, $events, $callback, $arg = NULL)
 	{
 		event_set($this->__handle, $fd, $events, $callback, $arg);
 		event_base_set($this->__handle, EventBase::getInstance()->__handle);
 		event_add($this->__handle);
 	}
 	
-	public function __destruct()
+	public function dispose()
 	{
 		event_del($this->__handle);
+	}
+	
+	public function __destruct()
+	{
+		$this->dispose();
 		event_free($this->__handle);
 	}
 }
@@ -244,14 +249,14 @@ class TcpSocketServerClient
 		$this->buffer->enable(EV_READ | EV_PERSIST);
 	}
 	
-	public function __error($buffer, $error, $arg)
+	public function __error($__1, $error, $arg)
 	{
 		$this->buffer->disable(EV_READ | EV_WRITE);
 		fclose($this->connection);
 		unset($this->buffer, $this->connection);
 	}
 
-	public function __read($buffer, $arg)
+	public function __read($__1, $arg)
 	{
 		//print_r(stream_get_meta_data($this->connection));
 		while ($read = $this->buffer->read(0x10000))
@@ -268,13 +273,17 @@ class TcpSocketServer
 	private $id = 0;
 	private $clients = [];
 
-	public function __construct($address, $port)
+	public function __construct()
+	{
+	}
+	
+	public function listen($address, $port, $acceptCallback)
 	{
 		$this->__handle = stream_socket_server("tcp://{$address}:{$port}", $errno, $errstr);
 		stream_set_blocking($this->__handle, 0);
 		
 		$this->event = new Event();
-		$this->event->set($this->__handle, EV_READ | EV_PERSIST, [$this, '__accept'], EventBase::getInstance()->__handle);
+		$this->event->set($this->__handle, EV_READ | EV_PERSIST, [$this, '__accept']);
 	}
 	
 	public function __accept($socket, $flag, $base)
@@ -298,6 +307,28 @@ class Timer
 	}
 }
 
+function readFileAsync($uri)
+{
+	$deferred = Promise::createDeferred();
+	
+	$f = fopen($uri, 'rb');
+	stream_set_blocking($f, 0);
+	
+	$event = new Event();
+	$buffer = '';
+	$event->set($f, EV_READ | EV_PERSIST, function() use ($event, $f, &$buffer, $deferred) {
+		$buffer .= fread($f, 0x10000);
+		$info = stream_get_meta_data($f);
+		if ($info['eof'])
+		{
+			$event->dispose();
+			$deferred->resolve($buffer);
+		}
+	});
+	
+	return $deferred->promise;
+}
+
 function setTimeout($callback, $timeMs)
 {
 	EventTimer::setTimeout($callback, $timeMs);
@@ -317,16 +348,18 @@ function spawn($functionGenerator)
 {
 	$generator = $functionGenerator();
 	
-	//$step = null;
-	
 	$step = function() use ($generator, &$step)
 	{
 		$promise = $generator->current();
 		if ($promise instanceof IPromise)
 		{
-			$promise->then(function($result) use ($generator, &$step)
+			$promise->then(function($result, $error) use ($generator, &$step)
 			{
-				$generator->send($result);
+				if ($error != null) {
+					$generator->throw($error);
+				} else {
+					$generator->send($result);
+				}
 				$step();
 			});
 		}
