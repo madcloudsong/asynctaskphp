@@ -1,45 +1,218 @@
 <?php
-$socket = stream_socket_server ('tcp://0.0.0.0:2000', $errno, $errstr);
-stream_set_blocking($socket, 0);
-$base = event_base_new();
-$event = event_new();
-event_set($event, $socket, EV_READ | EV_PERSIST, 'ev_accept', $base);
-event_base_set($event, $base);
-event_add($event);
-event_base_loop($base);
 
-$GLOBALS['connections'] = array();
-$GLOBALS['buffers'] = array();
+trait SingletonTrait
+{
+	static private $instance;
 
-function ev_accept($socket, $flag, $base) {
-    static $id = 0;
-    
-    $connection = stream_socket_accept($socket);
-    stream_set_blocking($connection, 0);
-    
-    $id += 1;
-    
-    $buffer = event_buffer_new($connection, 'ev_read', NULL, 'ev_error', $id);
-    event_buffer_base_set($buffer, $base);
-    event_buffer_timeout_set($buffer, 30, 30);
-    event_buffer_watermark_set($buffer, EV_READ, 0, 0xffffff);
-    event_buffer_priority_set($buffer, 10);
-    event_buffer_enable($buffer, EV_READ | EV_PERSIST);
-    
-    // we need to save both buffer and connection outside
-    $GLOBALS['connections'][$id] = $connection;
-    $GLOBALS['buffers'][$id] = $buffer;
+	public static function getInstance()
+	{
+		if (static::$instance == null) static::$instance = new static();
+		return static::$instance;
+	}
 }
 
-function ev_error($buffer, $error, $id) {
-    event_buffer_disable($GLOBALS['buffers'][$id], EV_READ | EV_WRITE);
-    event_buffer_free($GLOBALS['buffers'][$id]);
-    fclose($GLOBALS['connections'][$id]);
-    unset($GLOBALS['buffers'][$id], $GLOBALS['connections'][$id]);
+class EventBase
+{
+	use SingletonTrait;
+
+	public $__handle;
+	
+	public function __construct()
+	{
+		$this->__handle = event_base_new();
+	}
+	
+	public function __destruct()
+	{
+		event_base_free($this->__handler);
+	}
+
+	public function removeEvent(Event $event)
+	{
+		event_del($event->__handle);
+	}
+
+	public function addBuffer(EventBuffer $eventBuffer)
+	{
+		event_buffer_base_set($eventBuffer->__handle, $this->__handle);
+	}
+
+	public function loop()
+	{
+		event_base_loop($this->__handle);
+	}
 }
 
-function ev_read($buffer, $id) {
-    while ($read = event_buffer_read($buffer, 256)) {
-        var_dump($read);
-    }
+class Event
+{
+	public $__handle;
+
+	public function __construct()
+	{
+		$this->__handle = event_new();
+	}
+	
+	// EV_TIMEOUT, EV_SIGNAL, EV_READ, EV_WRITE and EV_PERSIST.
+	public function set($fd, $events, $callback, $arg)
+	{
+		event_set($this->__handle, $fd, $events, $callback, $arg);
+		event_base_set($this->__handle, EventBase::getInstance()->__handle);
+		event_add($this->__handle);
+	}
+	
+	public function __destruct()
+	{
+		event_free($this->__handle);
+	}
 }
+
+class EventTimer
+{
+	public $__handle;
+
+	public function __construct()
+	{
+		$this->__handle = event_timer_new();
+	}
+	
+	static public function setTimeout($callback, $timeMs)
+	{
+		$timer = new EventTimer();
+		$timer->set(function() use ($timer, $callback) {
+			$callback();
+		}, $timeMs);
+	}
+	
+	static public function setInterval($callback, $timeMs)
+	{
+		static::setTimeout(function() use ($callback, $timeMs) {
+			static::setInterval($callback, $timeMs);
+			$callback();
+		}, $timeMs);
+	}
+	
+	private function set($callback, $timeout)
+	{
+		$microSeconds = $timeout * 1000 * 1000;
+		event_timer_set($this->__handle, $callback, null);
+		event_base_set($this->__handle, EventBase::getInstance()->__handle);
+		event_timer_add($this->__handle, $microSeconds);
+	}
+	
+	public function __destruct()
+	{
+		event_free($this->__handle);
+	}
+}
+
+class EventBuffer
+{
+	public $__handle;
+	
+	public function __construct($stream, $readCallback, $writeCallback, $errorCallback, $arg = NULL)
+	{
+		$this->__handle = event_buffer_new($stream, $readCallback, $writeCallback, $errorCallback, $arg);
+		EventBase::getInstance()->addBuffer($this);
+	}
+	
+	public function __destruct()
+	{
+		event_buffer_free($this->__handle);
+	}
+	
+	public function setTimeout($readTimeout, $writeTimeout)
+	{
+		event_buffer_timeout_set($this->__handle, $readTimeout, $writeTimeout);
+	}
+
+	public function setWatermark($events, $lowmark, $highmark)
+	{
+		event_buffer_watermark_set($this->__handle, $events, $lowmark, $highmark);
+	}
+	
+	public function setPriority($priority)
+	{
+		event_buffer_priority_set($this->__handle, $priority);
+	}
+	
+	public function enable($events)
+	{
+		event_buffer_enable($this->__handle, $events);
+	}
+
+	public function disable($events)
+	{
+		event_buffer_disable($this->__handle, $events);
+	}
+	
+	public function read($data_size)
+	{
+		return event_buffer_read($this->__handle, $data_size);
+	}
+}
+
+class TcpSocketServerClient
+{
+	private $buffer;
+	private $connection;
+
+	public function __construct($connection)
+	{
+		$this->connection = $connection;
+		$this->buffer = new EventBuffer($connection, [$this, '__read'], NULL, [$this, '__error']);
+		$this->buffer->setTimeout(30, 30);
+		$this->buffer->setWatermark(EV_READ, 0, 0xffffff);
+		$this->buffer->setPriority(10);
+		$this->buffer->enable(EV_READ | EV_PERSIST);
+	}
+	
+	public function __error($buffer, $error, $arg)
+	{
+		$this->buffer->disable(EV_READ | EV_WRITE);
+		fclose($this->connection);
+		unset($this->buffer, $this->connection);
+	}
+
+	public function __read($buffer, $arg)
+	{
+		//print_r(stream_get_meta_data($this->connection));
+		while ($read = $this->buffer->read(0x10000))
+		{
+			var_dump($read);
+		}
+	}
+}
+
+class TcpSocketServer
+{
+	public $__handle;
+	private $event;
+	private $id = 0;
+	private $clients = [];
+
+	public function __construct($address, $port)
+	{
+		$this->__handle = stream_socket_server("tcp://{$address}:{$port}", $errno, $errstr);
+		stream_set_blocking($this->__handle, 0);
+		
+		$this->event = new Event();
+		$this->event->set($this->__handle, EV_READ | EV_PERSIST, [$this, '__accept'], EventBase::getInstance()->__handle);
+	}
+	
+	public function __accept($socket, $flag, $base)
+	{
+		$connection = stream_socket_accept($socket);
+		stream_set_blocking($connection, 0);
+		
+		$client = new TcpSocketServerClient($connection);
+	}
+}
+
+$server = new TcpSocketServer('127.0.0.1', 23);
+
+$timer = new EventTimer();
+EventTimer::setInterval(function() {
+	echo 'hello!';
+}, 1);
+
+EventBase::getInstance()->loop();
