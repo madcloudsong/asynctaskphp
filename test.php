@@ -15,6 +15,8 @@ spawn(function()
 	echo '[c]';
 	yield Timer::waitAsync(0.2);
 	echo '[d]';
+})->then(function() {
+	echo 'yay!';
 });
 
 spawn(function()

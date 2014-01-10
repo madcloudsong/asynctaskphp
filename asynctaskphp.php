@@ -346,9 +346,11 @@ function setInterval($callback, $timeMs)
 
 function spawn($functionGenerator)
 {
+	$deferred = Promise::createDeferred();
+
 	$generator = $functionGenerator();
 	
-	$step = function() use ($generator, &$step)
+	$step = function() use ($generator, &$step, $deferred)
 	{
 		$promise = $generator->current();
 		if ($promise instanceof IPromise)
@@ -362,10 +364,17 @@ function spawn($functionGenerator)
 				}
 				$step();
 			});
+		} else {
+			if (!$generator->valid())
+			{
+				$deferred->resolve();
+			}
 		}
 	};
 	
 	$step();
+	
+	return $deferred->promise;
 }
 
 function event_loop()
