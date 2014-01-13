@@ -311,20 +311,24 @@ function readFileAsync($uri)
 {
 	$deferred = Promise::createDeferred();
 	
-	$f = fopen($uri, 'rb');
-	stream_set_blocking($f, 0);
+	$f = @fopen($uri, 'rb');
 	
-	$event = new Event();
-	$buffer = '';
-	$event->set($f, EV_READ | EV_PERSIST, function() use ($event, $f, &$buffer, $deferred) {
-		$buffer .= fread($f, 0x10000);
-		$info = stream_get_meta_data($f);
-		if ($info['eof'])
-		{
-			$event->dispose();
-			$deferred->resolve($buffer);
-		}
-	});
+	if ($f) {
+		stream_set_blocking($f, 0);
+		$event = new Event();
+		$buffer = '';
+		$event->set($f, EV_READ | EV_PERSIST, function() use ($event, $f, &$buffer, $deferred) {
+			$buffer .= fread($f, 0x10000);
+			$info = stream_get_meta_data($f);
+			if ($info['eof'])
+			{
+				$event->dispose();
+				$deferred->resolve($buffer);
+			}
+		});
+	} else {
+		$deferred->reject(new Exception("Can't open '$uri'"));
+	}
 	
 	return $deferred->promise;
 }

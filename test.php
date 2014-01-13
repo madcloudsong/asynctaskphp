@@ -9,8 +9,12 @@ spawn(function()
 	echo '[b]';
 	yield Timer::waitAsync(0.2);
 	
-	$contents = (yield readFileAsync('http://php.net/'));
-	var_dump(substr($contents, 0, 200));
+	try {
+		$contents = (yield readFileAsync('http://php.net/'));
+		var_dump(substr($contents, 0, 200));
+	} catch (Exception $e) {
+		echo $e->getMessage();
+	}
 
 	echo '[c]';
 	yield Timer::waitAsync(0.2);
@@ -29,8 +33,12 @@ spawn(function()
 });
 
 spawn(function() {
-	$contents = (yield readFileAsync('http://google.es/'));
-	var_dump(substr($contents, 0, 200));
+	try {
+		$contents = (yield readFileAsync('http://google.es/'));
+		var_dump(substr($contents, 0, 200));
+	} catch (Exception $e) {
+		echo $e->getMessage();
+	}
 });
 
 
